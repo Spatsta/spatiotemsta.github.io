@@ -1,0 +1,733 @@
+---
+title: "改进的时空Moran's I在电力数据上的应用"
+subtitle: "电力数据会记录在同一时间内在同一区域内多个电力设施的能源产生和消耗情况，这些数据可以用于电能需求的预测和供需平衡的优化。"
+author: "张策"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: flatly
+    highlight: pygments
+    code_download: true
+    #code_folding: hide
+    toc: true
+    toc_float: true
+    number_sections: true
+    df_print: paged
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE, 
+                      message = FALSE
+                      )
+library(tidyverse)
+library(mapdata)
+library(ggplot2)
+library(openxlsx)
+library(sf)
+library(spdep)
+library(grid)
+library(gridExtra)
+library(reshape2)
+library(rgdal)
+library(maptools)
+library(corrr)
+
+
+#权重矩阵归一化
+WToOne=function(W){
+  W=W/sum(colSums(W))
+  return(W)
+}
+
+#数据矩阵标准化
+DataColNormalization=function(data){
+  means=colMeans(data)
+  stds=numeric(ncol(data))
+  for (i in 1:ncol(data)) {
+    sum=0
+    for (j in 1:nrow(data)) {
+      sum=sum+(data[j,i]-means[i])^2
+    }
+    stds[i]=sqrt(sum/nrow(data))
+    data[,i]=(data[,i]-means[i])/stds[i]
+  }
+  return(data)
+}
+
+#改进莫兰的矩阵计算
+Matrix_cal_I=function(data,W,n,t,N){
+  xs=(n*t)/N#计算系数
+  # xs=xs/w0(1或n) #取决于权重矩阵采用的方式
+  return(xs*(t(data)%*%W%*%data))
+}
+
+#全局莫兰的随机置换检验
+global_RanPerTest=function(data,W,M,n,t,N){
+  xs=(n*t)/N#计算系数
+  a=matrix(0,ncol(data),ncol(data))#存储检验p值
+  result=matrix(0,ncol(data),ncol(data))#存储检验结果
+  I=numeric(M+1)#存储莫兰的排列
+  II=matrix(0,M+1,ncol(data)*ncol(data))
+  #生成随机排列
+  # c1=as.vector(sample(1:21, replace=FALSE))
+  for (i in 1:ncol(data)) {
+    for (j in 1:ncol(data)) {
+      m=1
+      I[m]=xs*t(data[,i])%*%W%*%data[,j]
+      left=numeric(nrow(data))
+      right=numeric(nrow(data))
+      while (m<(M+1)) {
+        m=m+1
+        p=as.vector(sample(1:nrow(data), replace=FALSE))
+        #重排的data[,i],data[,j]
+        for (k in 1:nrow(data)) {
+          left[k]=data[p[k],i]
+          right[k]=data[p[k],j]
+        }
+        I[m]=xs*left%*%W%*%right#R语言机制的原因，left、right不是矩阵不需要转置
+      }
+      #计算I[1]的rank
+      rank=M+1
+      for (r in 2:(M+1)) {
+        if(I[1]>I[r]){
+          rank=rank-1
+        }
+      }
+      II[,(i-1)*ncol(data)+j]=I
+      a[i,j]=rank/(M+1)
+      if(a[i,j]<0.05|a[i,j]==0.05){
+        result[i,j]=1
+      }else if(a[i,j]>0.95|a[i,j]==0.95){
+        result[i,j]=-1
+      }
+    }
+  }
+  # print("moran's:")
+  # print(II)
+  print("随机置换检验的p值为:")
+  print(a)
+  print("随机置换检验的bool值为(其中1表示高高、低低聚集，-1表示高低聚集，0表示不显著):")
+  return(result)
+}
+
+```
+
+# 数据分析(美国50个州)
+```{r}
+#读取数据
+data <- read.xlsx("./data/美国月度电力数据/generation_monthly.xlsx",sheet="2021_Final")
+
+#去掉不必要的表头
+data_all=data[-c(1:3),]
+data_all
+colnames(data_all) <- c("YEAR", "MONTH","STATE", "TYPE_OF_PRODUCER","ENERGY_SOURCE", "GENERATION")
+
+#删除50个州之外的数据
+data_all_50=data_all[data_all$STATE!="DC"&data_all$STATE!="US-Total",]
+data_all_50
+
+
+#单独保存能源的数据(注意：不是每个州都会使用煤、天然气发电)
+data_all_50_Coal=data_all_50[data_all_50$ENERGY_SOURCE=="Coal",]
+data_all_50_Hydroelectric_Conventional=data_all_50[data_all_50$ENERGY_SOURCE=="Hydroelectric Conventional",]
+data_all_50_Natural_Gas=data_all_50[data_all_50$ENERGY_SOURCE=="Natural Gas",]
+data_all_50_Petroleum=data_all_50[data_all_50$ENERGY_SOURCE=="Petroleum",]
+data_all_50_Solar_Photovoltaic=data_all_50[data_all_50$ENERGY_SOURCE=="Solar Thermal and Photovoltaic",]
+
+# 使用Coal、Hydroelectric Conventional、Natural Gas、Petroleum、Solar Thermal and Photovoltaic、Wind的发电州数
+
+print(nrow(data_all_50_Coal %>%
+  distinct(STATE)))#缺少OR、VT(Coal)
+print(nrow(data_all_50_Hydroelectric_Conventional %>%
+  distinct(STATE)))#缺少DE、MS(Hydroelectric_Conventional)
+print(nrow(data_all_50_Natural_Gas %>%
+  distinct(STATE)))#缺少HI(Natural_Gas)
+print(nrow(data_all_50_Petroleum %>%
+  distinct(STATE)))#完整
+print(nrow(data_all_50_Solar_Photovoltaic %>%
+  distinct(STATE)))#缺少ND、WV(Solar_Photovoltaic)
+
+
+# write.xlsx(as.data.frame(data_all_50_Coal), file = "data_all_50_Coal.xlsx", row.names = FALSE, sheetName = "Coal")
+# write.xlsx(as.data.frame(data_all_50_Hydroelectric_Conventional), file = "data_all_50_Hydroelectric_Conventional.xlsx", row.names = FALSE, sheetName = "Hydroelectric Conventional")
+# write.xlsx(as.data.frame(data_all_50_Natural_Gas), file = "data_all_50_Natural_Gas.xlsx", row.names = FALSE, sheetName = "Natural Gas")
+# write.xlsx(as.data.frame(data_all_50_Petroleum), file = "data_all_50_Petroleum.xlsx", row.names = FALSE, sheetName = "Petroleum")
+# write.xlsx(as.data.frame(data_all_50_Solar_Photovoltaic), file = "data_all_50_Solar_Photovoltaic.xlsx", row.names = FALSE, sheetName = "Solar Thermal and Photovoltaic")
+
+
+# # 对“state”变量进行分类并统计每组数据条数
+# state_count <- table(data_all_50$STATE)
+# print(state_count)
+# # 对“MONTH”变量进行分类并统计每组数据条数
+# MONTH_count <- table(data_all_50$MONTH)
+# print(MONTH_count)
+# # 对“ENERGY_SOURCE”变量进行分类并统计每组数据条数
+# ENERGY_SOURCE_count <- table(data_all_50$ENERGY_SOURCE)
+# print(ENERGY_SOURCE_count)
+# # 对“TYPE_OF_PRODUCER”变量进行分类并统计每组数据条数
+# TYPE_OF_PRODUCER_count <- table(data_all_50$TYPE_OF_PRODUCER)
+# print(TYPE_OF_PRODUCER_count)
+
+
+
+```
+
+# 数据规范(统一不同时间不同观测数)
+```{r}
+#读取数据
+data_Coal <- read.xlsx("./data/美国月度电力数据/data_all_50_Coal.xlsx")
+data_Hydroelectric_Conventional <- read.xlsx("./data/美国月度电力数据/data_all_50_Hydroelectric_Conventional.xlsx")
+data_Natural_Gas <- read.xlsx("./data/美国月度电力数据/data_all_50_Natural_Gas.xlsx")
+data_Petroleum <- read.xlsx("./data/美国月度电力数据/data_all_50_Petroleum.xlsx")
+data_Solar_Photovoltaic <- read.xlsx("./data/美国月度电力数据/data_all_50_Solar_Photovoltaic.xlsx")
+
+# #统计每个州在每一个月有多少条数据
+# state_month_counts1 <- data_Solar_Photovoltaic %>%
+#   mutate(MONTH = as.integer(MONTH)) %>% 
+#   group_by(STATE, MONTH) %>%
+#   summarize(counts = n())
+# # state_month_counts1
+# #统计每个州是否包含12个月的数据
+# state_counts <- state_month_counts1 %>%
+#   group_by(STATE) %>%
+#   summarize(counts = n())
+# # state_counts
+# nrow(state_counts)
+# 
+# #50个州的不同观测数,长度为50*12=600
+# length(state_month_counts1$counts)
+# 
+# #******************处理数据(每个州关于12个月的观测数据相同),并构造不同月份的不同观测数L向量
+# # group by STATE and MONTH, then filter to keep only the first 3 rows in each group
+# data_2 <- data_Solar_Photovoltaic %>% 
+#   mutate(MONTH = as.integer(MONTH)) %>% 
+#   group_by(STATE, MONTH) %>% 
+#   filter(row_number() <= 2) %>% 
+#   # filter(GENERATION != 0) %>% #筛选GENERATION不等于0的行
+#   ungroup()
+# data_2
+
+# ******************保存5维数据******************
+Coal_2 <- data_Coal %>%
+  mutate(MONTH = as.integer(MONTH)) %>%
+  group_by(STATE, MONTH) %>%
+  filter(row_number() <= 2) %>%
+  # filter(GENERATION != 0) %>% #筛选GENERATION不等于0的行
+  ungroup()
+Hydroelectric_Conventional_2 <- data_Hydroelectric_Conventional %>%
+  mutate(MONTH = as.integer(MONTH)) %>%
+  group_by(STATE, MONTH) %>%
+  filter(row_number() <= 2) %>%
+  # filter(GENERATION != 0) %>% #筛选GENERATION不等于0的行
+  ungroup()
+Natural_Gas_2 <- data_Natural_Gas %>%
+  mutate(MONTH = as.integer(MONTH)) %>%
+  group_by(STATE, MONTH) %>%
+  filter(row_number() <= 2) %>%
+  # filter(GENERATION != 0) %>% #筛选GENERATION不等于0的行
+  ungroup()
+Petroleum_2 <- data_Petroleum %>%
+  mutate(MONTH = as.integer(MONTH)) %>%
+  group_by(STATE, MONTH) %>%
+  filter(row_number() <= 2) %>%
+  # filter(GENERATION != 0) %>% #筛选GENERATION不等于0的行
+  ungroup()
+Solar_Photovoltaic_2 <- data_Solar_Photovoltaic %>%
+  mutate(MONTH = as.integer(MONTH)) %>%
+  group_by(STATE, MONTH) %>%
+  filter(row_number() <= 2) %>%
+  # filter(GENERATION != 0) %>% #筛选GENERATION不等于0的行
+  ungroup()
+
+
+ENERGY_SOURCE_5dim=data.frame("Coal"=Coal_2$GENERATION,"Hydroelectric_Conventional"=Hydroelectric_Conventional_2$GENERATION,"Natural_Gas"=Natural_Gas_2$GENERATION,"Petroleum"=Petroleum_2$GENERATION,"Solar_Photovoltaic"=Solar_Photovoltaic_2$GENERATION)
+ENERGY_SOURCE_5dim
+
+# write.xlsx(as.data.frame(ENERGY_SOURCE_5dim), file = "ENERGY_SOURCE_5dim.xlsx", row.names = FALSE, sheetName = "sheet1")
+
+# # view the resulting dataframe
+# #统计每个州在每一个月有多少条数据
+# state_month_counts2 <- data_2 %>%
+#   mutate(MONTH = as.integer(MONTH)) %>% 
+#   group_by(STATE, MONTH) %>%
+#   summarize(counts = n())
+# state_month_counts2
+# 
+# sum(state_month_counts2$counts)#观测数据最终条数
+
+#L向量可设置为50*12个3
+L=rep(2, 600)
+sum(L)
+
+# 取3条数据的缺失问题
+#data_all_50_Hydroelectric_Conventional(1620):AL\AZ\FL\IN\LA\MD\MO\ND\NE\NJ\NM\OK\RI\SD
+#data_all_50_Coal(1668):AZ\CT\HI\ID\KS\KY\MA\NH\NM\RI\SD
+#data_all_50_Natural_Gas:无
+#data_all_50_Petroleum(1764):KS\KY\NE
+#data_all_50_Solar_Photovoltaic(1692):AK\ME\MS\MT\NH\RI\SD\UT\WY
+
+```
+
+# 时空权重矩阵(chatgpt)
+```{r}
+#加载shp文件
+states <- st_read("./data/美国地图/cb_2018_us_state_500k.shp")
+ # Wei <- read.xlsx("./data/美国地图/USA_con_800_Wei.xlsx",skipEmptyRows = FALSE)
+ # Wei=as.matrix(Wei)
+ # dim(Wei)
+ # sum(colSums(Wei))
+
+#取出50个州的shp文件
+states <- states[states$STUSPS %in% c("AK", "AL", "AR", "AZ", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "IA", "ID", "IL", "IN", "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO", "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM", "NV", "NY", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VT", "WA", "WI", "WV", "WY"),]
+#**********************************创建州之间的邻接矩阵********************************
+neighbors <- poly2nb(states)
+
+class(neighbors)
+
+W <- nb2mat(neighbors, style = "B", zero.policy = TRUE)
+diag(W) <- 0   #对角线W值设为0
+
+#空间邻接关系和
+class(W)
+sum(colSums(W))
+
+# 可视化空间权重矩阵
+# 将矩阵转换为数据框
+W_df <- melt(W)
+# 绘制热图
+ggplot(W_df, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "black") +
+  labs(x = "Spatial units", y = "Spatial units")
+
+#**********************************创建时间邻接矩阵**********************************
+T <- matrix(0,12,12)     
+for (i in 1:12) {
+  for (j in 1:12) {
+    if (abs(i-j) <3) {
+      T[i,j] <- 1
+    }
+  }
+}
+
+#生成时空权重矩阵
+WT <- kronecker(T,W)
+#时空邻接关系和
+dim(WT)
+sum(colSums(WT))
+# 可视化时空权重矩阵
+# 将矩阵转换为数据框
+WT_df <- melt(WT)
+
+# # 绘制热图
+ggplot(WT_df, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient(low = "white", high = "black") +
+  labs(x = "spatiotemporal units", y = "spatiotemporal units")
+
+# # write.xlsx(as.data.frame(WT), file = "STweight_matrix.xlsx", row.names = FALSE, sheetName = "sheet1")
+
+
+```
+
+# 扩展时空权重矩阵
+```{r}
+#先归一化再构造拓展空间权重矩阵
+WT_toOne=WToOne(WT)
+
+##**********************构造拓展空间权重矩阵***************************
+L=rep(2, 600)
+M_con=matrix(,nrow = 0,ncol = 1200)#创建1200列的空矩阵，注意空矩阵、零矩阵、NA矩阵
+
+for (i in 1:length(L)) {
+  A=matrix(,nrow = L[i],ncol = 0)#分块矩阵第一行
+  for (j in 1:length(L)) {
+    temp=WT_toOne[i,j]*matrix(1,L[i],L[j])
+    A=cbind(A,temp)
+  }
+  M_con=rbind(M_con,A)#合并分块矩阵的每一行
+}
+dim(M_con)
+
+```
+
+# 计算MoranST矩阵
+```{r}
+data=read.xlsx("./data/美国月度电力数据/ENERGY_SOURCE_5dim.xlsx")
+# 将df中所有列转换为数值型数据
+data <- apply(data, 2, as.numeric)[,1:4]
+colnames(data) <- c("Coal","Hydroelectric Conventional","Natural Gas","Petroleum")
+
+data_5dim=as.matrix(data)
+# dim(data_5dim)
+
+options(digits = 4)
+
+print("American(50州):基于的5种发电能源的改进时空Moran指数矩阵为")
+MoranST_Mat=Matrix_cal_I(DataColNormalization(data),M_con,50,12,1200)
+MoranST_Mat
+result=global_RanPerTest(DataColNormalization(data),M_con,500,50,12,1200)
+result
+colnames(result)=c("Coal","Hydroelectric Conventional","Natural Gas","Petroleum")
+rownames(result)=c("Coal","Hydroelectric Conventional","Natural Gas","Petroleum")
+
+# pdf(file = "M_01.pdf",width =12,height = 9)
+# corrplot(result, method = "color", col = c("blue","red"),
+#            type = "full", tl.cex = 0.6, tl.srt = 45)
+# dev.off()
+# 
+# setEPS()
+# postscript("M_01.eps", width = 12, height = 9)
+# corrplot(result, method = "color", col = c("blue","red"),
+#            type = "full", tl.cex = 0.6, tl.srt = 45)
+# dev.off()
+
+```
+
+# 可视化(折线图、箱线图)
+```{r}
+#以"州"为横坐标或者以"月份"横坐标
+#读取数据
+data <- read.xlsx("./data/美国月度电力数据/generation_monthly.xlsx",sheet="2021_Final")
+
+#去掉不必要的表头
+data_all=data[-c(1:3),]
+data_all
+colnames(data_all) <- c("YEAR", "MONTH","STATE", "TYPE_OF_PRODUCER","ENERGY_SOURCE", "GENERATION")
+
+#删除50个州之外的数据
+data_50=data_all[data_all$STATE!="DC"&data_all$STATE!="US-Total",]
+
+#保存不同能源的"50个州"的发电数据
+data_5dim_state <- data_50 %>%
+  mutate(GENERATION = as.integer(GENERATION)) %>%
+  mutate(MONTH = as.integer(MONTH)) %>%
+  group_by(STATE,MONTH,ENERGY_SOURCE) %>%
+  summarize(GENERATION = sum(GENERATION)) %>%
+  spread(STATE, GENERATION)
+colnames(data_5dim_state)
+data_5dim_state <- subset(data_5dim_state, ENERGY_SOURCE %in% c("Coal","Hydroelectric Conventional","Natural Gas","Petroleum","Solar Thermal and Photovoltaic","Total"))
+data_5dim_state_Coal=subset(data_5dim_state,ENERGY_SOURCE=="Coal")
+data_5dim_state_Coal=data_5dim_state_Coal[-c(1,2)]
+data_5dim_state_Coal$month <- factor(month.name[1:12])
+
+
+# 将数据转换为长格式
+df_long <- data_5dim_state_Coal %>% pivot_longer(-month, names_to = "state", values_to = "Electricity_Generated")
+df_long$month <- factor(df_long$month, levels =c("January","February","March","April","May","June", "July", "August", "September", "October", "November", "December"))
+
+
+# *************************************箱线图
+p1=ggplot(df_long, aes(x=month, y=Electricity_Generated, fill=month)) +
+  geom_boxplot() +
+  geom_point(aes(color = month), position = position_jitterdodge()) +
+  labs(x="Month", y="Electricity Generated")
+  # scale_fill_discrete(name="Month")
+p2=ggplot(df_long, aes(x=state, y=Electricity_Generated, fill=state)) +
+  geom_boxplot() +
+  geom_point(aes(color = state), position = position_jitterdodge()) +
+  labs(x="state", y="Electricity Generated")
+
+# *************************************小提琴
+# 画出图形
+ggplot(df_long, aes(x=month, y=Electricity_Generated, fill=month)) +
+  geom_violin() +
+  geom_point(aes(color = month), position = position_jitterdodge()) +
+  labs(x="Month", y="Electricity Generated")
+  # scale_fill_discrete(name="Month")
+ggplot(df_long, aes(x=state, y=Electricity_Generated, fill=state)) +
+  geom_violin() +
+  geom_point(aes(color = state), position = position_jitterdodge()) +
+  labs(x="state", y="Electricity Generated")
+
+# *************************************折线图
+# 画出图形
+p3=ggplot(df_long, aes(x = month, y = Electricity_Generated, group = state, color = state)) +
+  geom_line() +
+  geom_smooth(method = "gam", se =FALSE)+
+  theme_bw() +
+  ggtitle("Electricity Production by State, 2021") +
+  xlab("Month") +
+  ylab("Electricity Production (MWh)") +
+  scale_color_discrete(name = "state")
+
+# 画出图形
+p4=ggplot(df_long, aes(x = state, y = Electricity_Generated, group = month, color = month)) +
+  geom_line() +
+  theme_bw() +
+  ggtitle("Electricity Production by month, 2021") +
+  xlab("Month") +
+  ylab("Electricity Production (MWh)") +
+  scale_color_discrete(name = "month")
+
+pdf(file = "line_month.pdf",width =12,height = 9)
+grid.arrange(p4)
+dev.off()
+
+setEPS()
+postscript("line_month.eps", width = 12, height = 9)
+grid.arrange(p4)
+dev.off()
+
+```
+
+# 可视化(相关热力图)
+```{r}
+data <- read.xlsx("./data/美国月度电力数据/generation_monthly.xlsx",sheet="2021_Final")
+#去掉不必要的表头
+data_all=data[-c(1:3),]
+data_all
+colnames(data_all) <- c("YEAR", "MONTH","STATE", "TYPE_OF_PRODUCER","ENERGY_SOURCE", "GENERATION")
+
+#删除50个州之外的数据
+data_all_50=data_all[data_all$STATE!="DC"&data_all$STATE!="US-Total",]
+data_all_50
+
+data_4dim=data_all_50%>%
+    mutate(GENERATION = as.integer(GENERATION)) %>%
+  filter(ENERGY_SOURCE %in% c("Coal","Hydroelectric Conventional","Natural Gas","Petroleum"))%>%
+  group_by(STATE,ENERGY_SOURCE)%>%
+  summarise(Sum_gen=sum(GENERATION))
+
+df_wide <- data_4dim %>%
+  pivot_wider(names_from = ENERGY_SOURCE, values_from = Sum_gen)
+# df_long <- pivot_longer(df_wide, cols = c("Coal","Hydroelectric Conventional","Natural Gas","Petroleum"), names_to = "Energy_Type", values_to = "Value")
+# df_long <- gather(df_wide, key = "Energy_Type", value = "Value", -STATE)
+# 计算相关系数矩阵
+corr_matrix <- cor(df_wide[,2:5])
+# # 绘制热力图
+# corrplot(corr_matrix, method = "color", col = heat.colors(10), 
+#           type = "full", tl.cex = 0.6, tl.srt = 45)
+# 
+# pdf(file = "Cor.pdf",width =12,height = 9)
+# corrplot(corr_matrix, method = "color", col = heat.colors(10), 
+#           type = "full", tl.cex = 0.6, tl.srt = 45)
+# dev.off()
+# 
+# setEPS()
+# postscript("Cor.eps", width = 12, height = 9)
+# corrplot(corr_matrix, method = "color", col = heat.colors(10), 
+#           type = "full", tl.cex = 0.6, tl.srt = 45)
+# dev.off()
+
+```
+
+
+
+# 可视化(单维、多维地图)
+```{r}
+#读取电力数据
+data_Total=read.xlsx("./data/美国月度电力数据/data_all_50_Total.xlsx")
+data_GENERATION <- data_Total %>% 
+  mutate(GENERATION = as.integer(GENERATION)) %>%
+  group_by(STATE) %>% 
+  summarise(total_generation = sum(GENERATION))
+data_GENERATION$id=c(0:49)
+
+# max(data_GENERATION$long)
+# min(data_GENERATION$long)
+# max(data_GENERATION$lat)
+# min(data_GENERATION$lat)
+
+#读取地图数据
+USA_map <- readOGR("./data/美国地图/cb_2018_us_state_500k.shp",use_iconv = TRUE, encoding = "UTF-8") #文字信息.如名字、面积、缩写等
+#保留50个州的信息
+state_50=c("AK", "AL", "AR", "AZ", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "IA", "ID", "IL", "IN", "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO", "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM", "NV", "NY", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VT", "WA", "WI", "WV", "WY")
+
+data_GENERATION$STUSPS=state_50
+
+#合并地图数据与电力数据
+USA_map_standard <- fortify(USA_map)#数据信息.如经度、纬度、id(从0-55开始)等
+
+map0<-USA_map@data#保存原始文字信息
+USA_50_map_id<-data.frame(map0,id=c(0:55))#文字信息＋id
+USA_map_standard$id <- as.numeric(USA_map_standard$id)
+
+
+USA_map_standard_id<-full_join(USA_map_standard,USA_50_map_id)#左边是自定义id,右边是自己定的id.因此不能右链接，必须筛选左边的id
+USA_map_data <- right_join(USA_map_standard_id,data_GENERATION,by="STUSPS")#最终合并(此处不能根据id链接，因为左边df的id是乱的)
+USA_map_data=USA_map_data[order(USA_map_data$STUSPS),]
+
+
+data_GENERATION$long=c(-152.2782, -86.7911, -92.4426, -111.6608, -119.4696, -105.5478, -72.7273, -75.5050, -82.4497, -83.4426, -157.5050, -93.2105, -114.5103, -89.1965, -86.2816, -96.8005, -84.6514, -91.8749, -71.5314, -76.7909, -69.4455, -85.4100, -94.3053, -92.4581, -89.6678, -109.6333, -79.8064, -99.7930, -99.7952, -71.5818, -74.6728, -106.1126, -117.0236, -75.2822, -82.7937, -97.4943, -120.5583, -77.7996, -71.5562, -80.8431, -100.2263, -86.3498, -99.3312, -111.6703, -78.8537, -72.6658, -120.4472, -89.9941, -80.6227, -107.5512)
+data_GENERATION$lat=c(64.0685, 32.8067, 34.8938, 34.2744, 37.1841, 38.9972, 41.6219, 38.9896, 28.6305, 32.6415, 20.4606, 42.0115, 44.2394, 40.0417, 39.8942, 38.5111, 37.6690, 31.1801, 42.2373, 39.0550, 45.2538, 44.3467, 46.2807, 38.3566, 32.7364, 47.0527, 35.6301, 47.5362, 41.5378, 43.6805, 40.1907, 34.4071, 38.5020, 42.9192, 40.2862, 35.5889, 43.9336, 40.8781, 41.6762, 33.9533, 44.4443, 35.8600, 31.4757, 39.3055, 37.5215, 44.0687, 47.3826, 44.6243, 38.6409, 42.9957)
+
+#************************************************累计发电量分布图
+ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=total_generation),data=USA_map_data,colour="grey40")+
+  scale_fill_gradient(low="white",high="red")+
+  coord_map("polyconic")+
+  geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=3)+
+  xlim(-130, -70) +
+  ylim(20, 60)
+#************************************************各能源每月发电量分布图
+# data_Coal=read.xlsx("./data/美国月度电力数据/data_all_50_Solar_Photovoltaic.xlsx")
+# 
+# data_Coal <- data_Coal %>%
+#   mutate(GENERATION = as.integer(GENERATION)) %>%
+#   mutate(MONTH = as.integer(MONTH)) %>%
+#   group_by(MONTH, STATE) %>%
+#   summarize(GENERATION = sum(GENERATION)) %>%
+#   spread(STATE, GENERATION)
+# data_Coal=data_Coal[order(data_Coal$MONTH),]
+# data_Coal_T=as.data.frame(t(as.matrix(data_Coal))[-1,])
+# colnames(data_Coal_T) <- month.name
+# data_Coal_T$STUSPS=state_50
+# USA_map_Coal <- right_join(USA_map_standard_id,data_Coal_T,by="STUSPS")#最终合并(此处不能根据id链接，因为左边df的id是乱的)
+
+# pic=list()#用于存储12种空气污染物图片
+# pic[[1]]=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=January),data=USA_map_Coal,colour="grey40")+
+#   #按GDP的值作为背景色
+#   scale_fill_gradient(low="white",high="red")+
+#   coord_map("polyconic")+
+#   geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=1)+
+#   xlim(-130, -70) +
+#   ylim(20, 60)
+# pic[[2]]=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=February),data=USA_map_Coal,colour="grey40")+
+#   #按GDP的值作为背景色
+#   scale_fill_gradient(low="white",high="red")+
+#   coord_map("polyconic")+
+#   geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=1)+
+#   xlim(-130, -70) +
+#   ylim(20, 60)
+# pic[[3]]=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=March),data=USA_map_Coal,colour="grey40")+
+#   #按GDP的值作为背景色
+#   scale_fill_gradient(low="white",high="red")+
+#   coord_map("polyconic")+
+#   geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=1)+
+#   xlim(-130, -70) +
+#   ylim(20, 60)
+# pic[[4]]=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=April),data=USA_map_Coal,colour="grey40")+
+#   #按GDP的值作为背景色
+#   scale_fill_gradient(low="white",high="red")+
+#   coord_map("polyconic")+
+#   geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=1)+
+#   xlim(-130, -70) +
+#   ylim(20, 60)
+# 
+# pic[[5]]=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=May),data=USA_map_Coal,colour="grey40")+
+#   #按GDP的值作为背景色
+#   scale_fill_gradient(low="white",high="red")+
+#   coord_map("polyconic")+
+#   geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=1)+
+#   xlim(-130, -70) +
+#   ylim(20, 60)
+# pic[[6]]=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=June),data=USA_map_Coal,colour="grey40")+
+#   #按GDP的值作为背景色
+#   scale_fill_gradient(low="white",high="red")+
+#   coord_map("polyconic")+
+#   geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=1)+
+#   xlim(-130, -70) +
+#   ylim(20, 60)
+# pic[[7]]=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=July),data=USA_map_Coal,colour="grey40")+
+#   #按GDP的值作为背景色
+#   scale_fill_gradient(low="white",high="red")+
+#   coord_map("polyconic")+
+#   geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=1)+
+#   xlim(-130, -70) +
+#   ylim(20, 60)
+# pic[[8]]=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=August),data=USA_map_Coal,colour="grey40")+
+#   #按GDP的值作为背景色
+#   scale_fill_gradient(low="white",high="red")+
+#   coord_map("polyconic")+
+#   geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=1)+
+#   xlim(-130, -70) +
+#   ylim(20, 60)
+# 
+# pic[[9]]=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=September),data=USA_map_Coal,colour="grey40")+
+#   #按GDP的值作为背景色
+#   scale_fill_gradient(low="white",high="red")+
+#   coord_map("polyconic")+
+#   geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=1)+
+#   xlim(-130, -70) +
+#   ylim(20, 60)
+# pic[[10]]=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=October),data=USA_map_Coal,colour="grey40")+
+#   #按GDP的值作为背景色
+#   scale_fill_gradient(low="white",high="red")+
+#   coord_map("polyconic")+
+#   geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=1)+
+#   xlim(-130, -70) +
+#   ylim(20, 60)
+# pic[[11]]=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=November),data=USA_map_Coal,colour="grey40")+
+#   #按GDP的值作为背景色
+#   scale_fill_gradient(low="white",high="red")+
+#   coord_map("polyconic")+
+#   geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=1)+
+#   xlim(-130, -70) +
+#   ylim(20, 60)
+# pic[[12]]=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=December),data=USA_map_Coal,colour="grey40")+
+#   #按GDP的值作为背景色
+#   scale_fill_gradient(low="white",high="red")+
+#   coord_map("polyconic")+
+#   geom_text(aes(x=long,y=lat,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=1)+
+#   xlim(-130, -70) +
+#   ylim(20, 60)
+# # grid.arrange(pic[[1]],pic[[2]],pic[[3]],pic[[4]],pic[[5]],pic[[6]],pic[[7]],pic[[8]],pic[[9]],pic[[10]],pic[[11]],pic[[12]])
+# 
+# pdf(file = "Solar_Photovoltaic.pdf",width =12,height = 9)
+# grid.arrange(pic[[1]],pic[[2]],pic[[3]],pic[[4]],pic[[5]],pic[[6]],pic[[7]],pic[[8]],pic[[9]],pic[[10]],pic[[11]],pic[[12]])
+# dev.off()
+# 
+# setEPS()
+# postscript("Solar_Photovoltaic.eps", width = 12, height = 9)
+# grid.arrange(pic[[1]],pic[[2]],pic[[3]],pic[[4]],pic[[5]],pic[[6]],pic[[7]],pic[[8]],pic[[9]],pic[[10]],pic[[11]],pic[[12]])
+# dev.off()
+
+#************************************************各能源分布图与总分布
+#读取数据
+data <- read.xlsx("./data/美国月度电力数据/generation_monthly.xlsx",sheet="2021_Final")
+
+#去掉不必要的表头
+data_all=data[-c(1:3),]
+data_all
+colnames(data_all) <- c("YEAR", "MONTH","STATE", "TYPE_OF_PRODUCER","ENERGY_SOURCE", "GENERATION")
+
+#删除50个州之外的数据
+data_5dim=data_all[data_all$STATE!="DC"&data_all$STATE!="US-Total",]
+
+data_5dim <- data_5dim %>%
+  mutate(GENERATION = as.integer(GENERATION)) %>%
+  group_by(STATE,ENERGY_SOURCE) %>%
+  summarize(GENERATION = sum(GENERATION)) %>%
+  spread(STATE, GENERATION)
+data_5dim=data_5dim[c(1,3,4,9,11,12),]
+#c("Coal","Hydroelectric_Conventional","Natural_Gas","Petroleum","Solar_Photovoltaic","Total")
+data_5dim=as.data.frame(t(as.matrix(data_5dim))[-1,])
+colnames(data_5dim) <- c("Coal","Hydroelectric_Conventional","Natural_Gas","Petroleum","Solar_Photovoltaic","Total")
+data_5dim[, 1:6] <- apply(data_5dim[, 1:6], 2, as.numeric)
+data_5dim$STUSPS=state_50
+USA_map_Coal <- right_join(USA_map_standard_id,data_5dim,by="STUSPS")#最终合并(此处不能根据id链接，因为左边df的id是乱的)
+
+data_5dim$long=c(-152.2782, -86.7911, -92.4426, -111.6608, -119.4696, -105.5478, -72.7273, -75.5050, -82.4497, -83.4426, -157.5050, -93.2105, -114.5103, -89.1965, -86.2816, -96.8005, -84.6514, -91.8749, -71.5314, -76.7909, -69.4455, -85.4100, -94.3053, -92.4581, -89.6678, -109.6333, -79.8064, -99.7930, -99.7952, -71.5818, -74.6728, -106.1126, -117.0236, -75.2822, -82.7937, -97.4943, -120.5583, -77.7996, -71.5562, -80.8431, -100.2263, -86.3498, -99.3312, -111.6703, -78.8537, -72.6658, -120.4472, -89.9941, -80.6227, -107.5512)
+data_5dim$lat=c(64.0685, 32.8067, 34.8938, 34.2744, 37.1841, 38.9972, 41.6219, 38.9896, 28.6305, 32.6415, 20.4606, 42.0115, 44.2394, 40.0417, 39.8942, 38.5111, 37.6690, 31.1801, 42.2373, 39.0550, 45.2538, 44.3467, 46.2807, 38.3566, 32.7364, 47.0527, 35.6301, 47.5362, 41.5378, 43.6805, 40.1907, 34.4071, 38.5020, 42.9192, 40.2862, 35.5889, 43.9336, 40.8781, 41.6762, 33.9533, 44.4443, 35.8600, 31.4757, 39.3055, 37.5215, 44.0687, 47.3826, 44.6243, 38.6409, 42.9957)
+
+#画图
+pmax=ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=Total),data=USA_map_Coal,colour="grey40")+
+  #按GDP的值作为背景色
+  scale_fill_gradient(low="white",high="red")+
+  coord_map("mercator")+
+  geom_text(aes(x=long,y=lat-0.1,label=paste0(data_GENERATION$STATE)),data=data_GENERATION,size=2)+
+  geom_errorbar(data=data_5dim,aes(x=long-0.6,ymin=lat,ymax=lat+3*Coal/max(Coal,Hydroelectric_Conventional,Natural_Gas,Petroleum)*8),size=1.5,color="#0000FF",width=0,alpha=0.8)+ #臭氧柱形图
+  geom_errorbar(data=data_5dim,aes(x=long-0.2,ymin=lat,ymax=lat+18*Hydroelectric_Conventional/max(Coal,Hydroelectric_Conventional,Natural_Gas,Petroleum)*8),size=1.5,color="#00FF00",width=0,alpha=0.8)+ #PM10柱形图
+  geom_errorbar(data=data_5dim,aes(x=long+0.2,ymin=lat,ymax=lat+3*Natural_Gas/max(Coal,Hydroelectric_Conventional,Natural_Gas,Petroleum)*8),size=1.5,color="orange",width=0,alpha=0.8)+ #PM2.5柱形图
+  geom_errorbar(data=data_5dim,aes(x=long+0.6,ymin=lat,ymax=lat+300*Petroleum/max(Coal,Hydroelectric_Conventional,Natural_Gas,Petroleum)*8),size=1.5,color="#800080",width=0,alpha=0.8)+
+  # geom_errorbar(data=data0,aes(x=long+0.2,ymin=lat,ymax=lat+0.4*CO/max(O3,PM10,PM2.5,SO2,NO2,CO)*3),size=1.5,color="#FFA500",width=0,alpha=0.8)+
+  annotate("text", x=-129, y=52, label="Coal", color= "#0000FF", size=4)+ 
+  annotate("text", x=-110, y=55, label="Hydroelectric_Conventional", color= "#00FF00", size=4) +
+  annotate("text", x=-90, y=55, label="Natural_Gas", color= "orange", size=4)+
+  annotate("text", x=-71, y=52, label="Petroleum", color= "#800080", size=4)+
+  xlim(-129, -71) +
+  ylim(22, 58)
+
+# plot(pmax)
+
+pdf(file = "GENERATIONs.pdf",width =12,height = 9)
+plot(pmax)
+dev.off()
+
+setEPS()
+postscript("GENERATIONs.eps", width = 12, height = 9)
+plot(pmax)
+dev.off()
+
+```
+
