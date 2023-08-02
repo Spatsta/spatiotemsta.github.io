@@ -115,7 +115,7 @@ global_RanPerTest=function(data,W,M,n,t,N){
 # 数据分析(美国50个州)
 ```{r}
 #读取数据
-data <- read.xlsx("./data/美国月度电力数据/generation_monthly.xlsx",sheet="2021_Final")
+data <- read.xlsx("./generation_monthly.xlsx",sheet="2021_Final")
 
 #去掉不必要的表头
 data_all=data[-c(1:3),]
@@ -175,11 +175,11 @@ print(nrow(data_all_50_Solar_Photovoltaic %>%
 # 数据规范(统一不同时间不同观测数)
 ```{r}
 #读取数据
-data_Coal <- read.xlsx("./data/美国月度电力数据/data_all_50_Coal.xlsx")
-data_Hydroelectric_Conventional <- read.xlsx("./data/美国月度电力数据/data_all_50_Hydroelectric_Conventional.xlsx")
-data_Natural_Gas <- read.xlsx("./data/美国月度电力数据/data_all_50_Natural_Gas.xlsx")
-data_Petroleum <- read.xlsx("./data/美国月度电力数据/data_all_50_Petroleum.xlsx")
-data_Solar_Photovoltaic <- read.xlsx("./data/美国月度电力数据/data_all_50_Solar_Photovoltaic.xlsx")
+data_Coal <- read.xlsx("./data_all_50_Coal.xlsx")
+data_Hydroelectric_Conventional <- read.xlsx("./data_all_50_Hydroelectric_Conventional.xlsx")
+data_Natural_Gas <- read.xlsx("./data_all_50_Natural_Gas.xlsx")
+data_Petroleum <- read.xlsx("./data_all_50_Petroleum.xlsx")
+data_Solar_Photovoltaic <- read.xlsx("./data_all_50_Solar_Photovoltaic.xlsx")
 
 # #统计每个州在每一个月有多少条数据
 # state_month_counts1 <- data_Solar_Photovoltaic %>%
@@ -271,8 +271,8 @@ sum(L)
 # 时空权重矩阵(chatgpt)
 ```{r}
 #加载shp文件
-states <- st_read("./data/美国地图/cb_2018_us_state_500k.shp")
- # Wei <- read.xlsx("./data/美国地图/USA_con_800_Wei.xlsx",skipEmptyRows = FALSE)
+states <- st_read("./cb_2018_us_state_500k.shp")
+ # Wei <- read.xlsx("./USA_con_800_Wei.xlsx",skipEmptyRows = FALSE)
  # Wei=as.matrix(Wei)
  # dim(Wei)
  # sum(colSums(Wei))
@@ -353,7 +353,7 @@ dim(M_con)
 
 # 计算MoranST矩阵
 ```{r}
-data=read.xlsx("./data/美国月度电力数据/ENERGY_SOURCE_5dim.xlsx")
+data=read.xlsx("./ENERGY_SOURCE_5dim.xlsx")
 # 将df中所有列转换为数值型数据
 data <- apply(data, 2, as.numeric)[,1:4]
 colnames(data) <- c("Coal","Hydroelectric Conventional","Natural Gas","Petroleum")
@@ -388,7 +388,7 @@ rownames(result)=c("Coal","Hydroelectric Conventional","Natural Gas","Petroleum"
 ```{r}
 #以"州"为横坐标或者以"月份"横坐标
 #读取数据
-data <- read.xlsx("./data/美国月度电力数据/generation_monthly.xlsx",sheet="2021_Final")
+data <- read.xlsx("./generation_monthly.xlsx",sheet="2021_Final")
 
 #去掉不必要的表头
 data_all=data[-c(1:3),]
@@ -473,7 +473,7 @@ dev.off()
 
 # 可视化(相关热力图)
 ```{r}
-data <- read.xlsx("./data/美国月度电力数据/generation_monthly.xlsx",sheet="2021_Final")
+data <- read.xlsx("./generation_monthly.xlsx",sheet="2021_Final")
 #去掉不必要的表头
 data_all=data[-c(1:3),]
 data_all
@@ -517,7 +517,7 @@ corr_matrix <- cor(df_wide[,2:5])
 # 可视化(单维、多维地图)
 ```{r}
 #读取电力数据
-data_Total=read.xlsx("./data/美国月度电力数据/data_all_50_Total.xlsx")
+data_Total=read.xlsx("./data_all_50_Total.xlsx")
 data_GENERATION <- data_Total %>% 
   mutate(GENERATION = as.integer(GENERATION)) %>%
   group_by(STATE) %>% 
@@ -530,7 +530,7 @@ data_GENERATION$id=c(0:49)
 # min(data_GENERATION$lat)
 
 #读取地图数据
-USA_map <- readOGR("./data/美国地图/cb_2018_us_state_500k.shp",use_iconv = TRUE, encoding = "UTF-8") #文字信息.如名字、面积、缩写等
+USA_map <- readOGR("./cb_2018_us_state_500k.shp",use_iconv = TRUE, encoding = "UTF-8") #文字信息.如名字、面积、缩写等
 #保留50个州的信息
 state_50=c("AK", "AL", "AR", "AZ", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "IA", "ID", "IL", "IN", "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO", "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM", "NV", "NY", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VT", "WA", "WI", "WV", "WY")
 
@@ -560,7 +560,7 @@ ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=total_generation),data=U
   xlim(-130, -70) +
   ylim(20, 60)
 #************************************************各能源每月发电量分布图
-# data_Coal=read.xlsx("./data/美国月度电力数据/data_all_50_Solar_Photovoltaic.xlsx")
+# data_Coal=read.xlsx("./data_all_50_Solar_Photovoltaic.xlsx")
 # 
 # data_Coal <- data_Coal %>%
 #   mutate(GENERATION = as.integer(GENERATION)) %>%
@@ -674,7 +674,7 @@ ggplot()+geom_polygon(aes(x=long,y=lat,group=group,fill=total_generation),data=U
 
 #************************************************各能源分布图与总分布
 #读取数据
-data <- read.xlsx("./data/美国月度电力数据/generation_monthly.xlsx",sheet="2021_Final")
+data <- read.xlsx("./generation_monthly.xlsx",sheet="2021_Final")
 
 #去掉不必要的表头
 data_all=data[-c(1:3),]
